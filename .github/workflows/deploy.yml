@@ -1,0 +1,102 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: task-api
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install -r app/requirements.txt pytest
+
+      - run: python -m pytest tests/ -v
+
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+
+    outputs:
+      image-tag: ${{ steps.set-tag.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: set-tag
+        run: echo "tag=$(echo $GITHUB_SHA | cut -c1-8)" >> $GITHUB_OUTPUT
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.set-tag.outputs.tag }}
+
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - env:
+          SERVER_IP: ${{ secrets.EC2_HOST }}
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+
+        run: |
+          echo "$SSH_KEY" > deploy_key.pem
+          chmod 600 deploy_key.pem
+
+          ssh -o StrictHostKeyChecking=no -i deploy_key.pem ubuntu@$SERVER_IP << DEPLOY
+
+            AWS_ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text)
+
+            ECR_REGISTRY="\${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+              docker login --username AWS --password-stdin \$ECR_REGISTRY
+
+            docker pull \$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+
+            docker stop task-api 2>/dev/null || true
+            docker rm task-api 2>/dev/null || true
+
+            docker run -d \
+              --name task-api \
+              --restart unless-stopped \
+              -p 8080:8080 \
+              -e APP_VERSION=$IMAGE_TAG \
+              \$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+
+            sleep 10
+
+            curl -sf http://localhost:8080/health
+
+          DEPLOY
+
+          rm -f deploy_key.pem

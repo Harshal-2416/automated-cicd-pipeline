@@ -1,0 +1,9 @@
+venv/
+__pycahce__/
+*.pyc
+.git/
+.github/
+terraform/
+tests/
+*.md/
+.env
