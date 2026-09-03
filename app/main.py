@@ -15,7 +15,7 @@ def health():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": os.getenv("APP_VERSION", "1.0.0")
+        "version": os.getenv("APP_VERSION", "2.0.0")
     })
 
 @app.route('/api/tasks', methods=['GET'])
